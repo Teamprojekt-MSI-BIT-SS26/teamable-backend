@@ -11,8 +11,39 @@ from rest_framework.authtoken.models import Token
 from accounts.models import MyUser
 from app.models import CourseMember, Course, Organization
 from app.models.course_member import UserRole
+from app.models.organization import LMSTypeOptions
 from lti import lti_util
 from pprint import pprint
+import os
+
+
+CLAIM_CUSTOM = "https://purl.imsglobal.org/spec/lti/claim/custom"
+CLAIM_CONTEXT = "https://purl.imsglobal.org/spec/lti/claim/context"
+CLAIM_TOOL_PLATFORM = "https://purl.imsglobal.org/spec/lti/claim/tool_platform"
+CLAIM_NRPS = "https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice"
+
+
+def get_lms_type(launch_data: dict) -> str:
+    """Detect the LMS from the platform claim, falling back to Canvas."""
+    family = (launch_data.get(CLAIM_TOOL_PLATFORM) or {}).get("product_family_code")
+    if family == "moodle":
+        return LMSTypeOptions.MOODLE
+    return LMSTypeOptions.CANVAS
+
+
+def get_lms_ids(launch_data: dict) -> tuple[str | None, str | None]:
+    """
+    Returns (course id, user id) as the LMS knows them.
+    Canvas ids come from custom fields (see
+    https://gist.github.com/jbasdf/15fb8abed66fbaf623cdfbdd45bfb1c4), other
+    platforms use the standard LTI claims.
+    """
+    custom = launch_data.get(CLAIM_CUSTOM) or {}
+    course_id = custom.get("canvas_course_id") or (
+        launch_data.get(CLAIM_CONTEXT) or {}
+    ).get("id")
+    user_id = custom.get("canvas_user_id") or launch_data.get("sub")
+    return course_id, user_id
 
 
 @csrf_exempt
@@ -53,7 +84,7 @@ def launch(request):
 
     message_launch_data = message_launch.get_launch_data()
 
-    # check if instructor (only instructors can LTI launch at this time)
+    # check if instructor
     roles = message_launch_data.get(
         "https://purl.imsglobal.org/spec/lti/claim/roles", []
     )
@@ -87,27 +118,20 @@ def launch(request):
 
     launch_iss = message_launch_data.get("iss")
 
-    # create/sync user
-    # custom variables need to be defined in Canvas, defined by consulting
-    #   https://gist.github.com/jbasdf/15fb8abed66fbaf623cdfbdd45bfb1c4
-    canvas_course_id = message_launch_data.get(
-        "https://purl.imsglobal.org/spec/lti/claim/custom", {}
-    ).get("canvas_course_id")
-    canvas_user_id = message_launch_data.get(
-        "https://purl.imsglobal.org/spec/lti/claim/custom", {}
-    ).get("canvas_user_id")
+    lms_type = get_lms_type(message_launch_data)
+    lms_course_id, lms_user_id = get_lms_ids(message_launch_data)
 
-    if not canvas_course_id or not canvas_user_id:
+    if not lms_course_id or not lms_user_id:
         raise Exception(
-            "Missing canvas_course_id/canvas_user_id custom claims. Check "
-            "that the custom_fields block is configured on the Canvas "
-            "developer key"
+            "Missing course/user id in the LTI launch. For Canvas, check that the "
+            "custom_fields block is configured on the developer key"
         )
 
+    # create/sync user
     auth_user, created = MyUser.objects.get_or_create(
         # Make the username unique to the launch ISS, so different
         # institution's Canvas instance creates unique usernames
-        username=f"{canvas_user_id}+{launch_iss}"
+        username=f"{lms_user_id}+{launch_iss}"
     )
     auth_user.first_name = message_launch_data.get("given_name")
     auth_user.last_name = message_launch_data.get("family_name")
@@ -119,13 +143,16 @@ def launch(request):
     auth_login(request, auth_user)
 
     # make the authentication token for the frontend
-    Token.objects.get_or_create(user=auth_user)
+    auth_token, _ = Token.objects.get_or_create(user=auth_user)
 
-    # todo: this is only true for now
-    organization = Organization.objects.first()
+    # todo: this does not distinguish multiple organizations of the same LMS type
+    organization = (
+        Organization.objects.filter(lms_type=lms_type).first()
+        or Organization.objects.first()
+    )
 
     course, created = Course.objects.get_or_create(
-        lms_course_id=canvas_course_id,
+        lms_course_id=lms_course_id,
         defaults={
             "name": message_launch_data.get(
                 "https://purl.imsglobal.org/spec/lti/claim/context", {}
@@ -134,18 +161,35 @@ def launch(request):
         },
     )
 
+    # remember how to reach the LTI Advantage services (Names and Roles) for this course
+    memberships_url = (message_launch_data.get(CLAIM_NRPS) or {}).get(
+        "context_memberships_url"
+    )
+    if memberships_url:
+        course.lms_iss = launch_iss
+        course.lms_client_id = message_launch.get_client_id()
+        course.lms_memberships_url = memberships_url
+        course.save()
+
     course_member, created = CourseMember.objects.get_or_create(
         user=auth_user,
         course=course,
         defaults={
             "first_name": auth_user.first_name,
             "last_name": auth_user.last_name,
-            "lms_id": canvas_user_id,
+            "lms_id": lms_user_id,
         },
     )
     course_member.role = role
     course_member.save()
 
+    if lms_type == LMSTypeOptions.CANVAS:
+        # Canvas API access needs an OAuth2 token on top of the LTI login
+        return redirect(
+            f"{reverse('canvas-oauth-initiate')}?redirect_path=/course/{course.pk}"
+        )
+
+    client_url = os.environ.get("FRONTEND_BASE_URL")
     return redirect(
-        f"{reverse('canvas-oauth-initiate')}?redirect_path=/course/{course.pk}"
+        f"{client_url}/authenticate?token={auth_token}&path=/course/{course.pk}"
     )

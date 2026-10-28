@@ -8,9 +8,11 @@ from app.canvas.import_attribute import import_gradebook_attribute_from_canvas
 from app.canvas.import_students import import_students_from_canvas
 from app.canvas.opt_in_quiz import create_opt_in_quiz_canvas
 from app.filters.course_member import FilterStudents
+from app.lti_services.import_students import NrpsNotAvailable, import_students_via_nrps
 from app.models.attribute import Attribute, AttributeManageType
 from app.models.course import Course
 from app.models.course_member import UserRole
+from app.models.organization import LMSTypeOptions
 from app.models.team import TeamSet
 from app.paginators.pagination import ExamplePagination
 from app.permissions import IsCourseInstructor
@@ -22,6 +24,17 @@ from app.serializers.teams import (
     DisplaySingleTeamSetSerializer,
 )
 from app.services.team_generation import generate_teams
+
+
+def lms_not_supported_response(course: Course):
+    """Canvas is the only LMS with an API integration so far."""
+    lms_type = course.organization.lms_type if course.organization else None
+    if lms_type == LMSTypeOptions.CANVAS:
+        return None
+    return Response(
+        {"detail": f"This action is not supported for LMS type {lms_type}."},
+        status=status.HTTP_501_NOT_IMPLEMENTED,
+    )
 
 
 class ExportTeamSerializer(serializers.ModelSerializer):
@@ -100,7 +113,17 @@ class CourseViewSet(
     )
     def import_students_from_lms(self, request, pk=None):
         course = self.get_object()
-        import_students_from_canvas(request, course=course)
+        if course.organization.lms_type == LMSTypeOptions.CANVAS:
+            import_students_from_canvas(request, course=course)
+            return Response(status=status.HTTP_200_OK)
+
+        # other LMS: LTI Names and Roles service
+        try:
+            import_students_via_nrps(course)
+        except NrpsNotAvailable as e:
+            return Response(
+                {"detail": str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
         return Response(status=status.HTTP_200_OK)
 
     @action(
@@ -118,6 +141,8 @@ class CourseViewSet(
         # Pylance doesn't know that validated_data is valid after is_valid() check
         team_set = serializer.validated_data["team_set"]  # type: ignore
 
+        if (response := lms_not_supported_response(team_set.course)) is not None:
+            return response
         export_team_to_canvas(request, team_set=team_set)
         return Response(status=status.HTTP_200_OK)
 
@@ -129,6 +154,8 @@ class CourseViewSet(
     )
     def create_opt_in_quiz_lms(self, request, pk=None):
         course = self.get_object()
+        if (response := lms_not_supported_response(course)) is not None:
+            return response
         create_opt_in_quiz_canvas(request, course=course)
         return Response(status=status.HTTP_200_OK)
 
@@ -155,6 +182,8 @@ class CourseViewSet(
     )
     def import_gradebook_attribute_from_lms(self, request, pk=None):
         course = self.get_object()
+        if (response := lms_not_supported_response(course)) is not None:
+            return response
         import_gradebook_attribute_from_canvas(request, course=course)
         return Response(status=status.HTTP_200_OK)
 
