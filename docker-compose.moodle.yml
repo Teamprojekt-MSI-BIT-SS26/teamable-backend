@@ -1,0 +1,30 @@
+services:
+  db:
+    image: mariadb:10.11
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: moodle
+      MARIADB_USER: moodle
+      MARIADB_PASSWORD: moodle
+    volumes:
+      - db-data:/var/lib/mysql
+
+  moodle:
+    image: brandkern/moodle:4.5-latest
+    depends_on:
+      - db
+    ports:
+      - "8008:80"
+    environment:
+      DB_HOST: db
+      DB_NAME: moodle
+      DB_USER: moodle
+      DB_PASS: moodle
+      WWWROOT: http://localhost:8008
+    volumes:
+      - moodledata:/var/www/moodledata
+
+volumes:
+  db-data:
+  moodledata:

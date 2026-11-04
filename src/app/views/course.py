@@ -7,10 +7,12 @@ from app.canvas.export_team import export_team_to_canvas
 from app.canvas.import_attribute import import_gradebook_attribute_from_canvas
 from app.canvas.import_students import import_students_from_canvas
 from app.canvas.opt_in_quiz import create_opt_in_quiz_canvas
+from app.moodle.import_students import import_students_from_moodle
 from app.filters.course_member import FilterStudents
 from app.models.attribute import Attribute, AttributeManageType
 from app.models.course import Course
 from app.models.course_member import UserRole
+from app.models.organization import LMSTypeOptions
 from app.models.team import TeamSet
 from app.paginators.pagination import ExamplePagination
 from app.permissions import IsCourseInstructor
@@ -85,12 +87,12 @@ class CourseViewSet(
     serializer_class = CourseViewSerializer
     permission_classes = [IsCourseInstructor]
 
-    def get_serializer_class(
-        self,
-    ) -> Type[CourseUpdateSerializer | CourseViewSerializer]:
+    def get_serializer_class(self) -> Type[serializers.BaseSerializer]:
         if self.action in ["update", "partial_update"]:
             return CourseUpdateSerializer
-        return CourseViewSerializer
+        # Respect the serializer_class of custom actions (e.g. students), which
+        # was previously overridden by CourseViewSerializer for every action
+        return super().get_serializer_class()
 
     @action(
         detail=True,
@@ -100,7 +102,10 @@ class CourseViewSet(
     )
     def import_students_from_lms(self, request, pk=None):
         course = self.get_object()
-        import_students_from_canvas(request, course=course)
+        if course.organization.lms_type == LMSTypeOptions.MOODLE:
+            import_students_from_moodle(course)
+        else:
+            import_students_from_canvas(request, course=course)
         return Response(status=status.HTTP_200_OK)
 
     @action(

@@ -1,3 +1,5 @@
+import os
+
 from django.urls import reverse
 from pylti1p3.contrib.django.oidc_login import DjangoOIDCLogin
 from pylti1p3.contrib.django.message_launch import DjangoMessageLaunch
@@ -145,6 +147,25 @@ def launch(request):
     )
     course_member.role = role
     course_member.save()
+
+    # Spike (Moodle): Moodle has no Canvas-style OAuth2 for its APIs, so the
+    # Canvas OAuth flow is skipped. The roster is fetched later via LTI NRPS
+    # (see app.moodle.import_students), which needs the URL from this launch.
+    platform = message_launch_data.get(
+        "https://purl.imsglobal.org/spec/lti/claim/tool_platform", {}
+    ).get("product_family_code")
+    if platform == "moodle":
+        course.lms_memberships_url = message_launch_data.get(
+            "https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice", {}
+        ).get("context_memberships_url")
+        course.save()
+
+        # Same hand-off to the frontend as canvas_oauth.oauth.initiate_oauth_check
+        auth_token, _ = Token.objects.get_or_create(user=auth_user)
+        client_url = os.environ.get("FRONTEND_BASE_URL")
+        return redirect(
+            f"{client_url}/authenticate?token={auth_token}&path=/course/{course.pk}"
+        )
 
     return redirect(
         f"{reverse('canvas-oauth-initiate')}?redirect_path=/course/{course.pk}"
