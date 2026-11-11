@@ -8,12 +8,13 @@ from app.canvas.import_attribute import import_gradebook_attribute_from_canvas
 from app.canvas.import_students import import_students_from_canvas
 from app.canvas.opt_in_quiz import create_opt_in_quiz_canvas
 from app.filters.course_member import FilterStudents
-from app.lti_services.import_students import NrpsNotAvailable, import_students_via_nrps
 from app.models.attribute import Attribute, AttributeManageType
 from app.models.course import Course
 from app.models.course_member import UserRole
 from app.models.organization import LMSTypeOptions
 from app.models.team import TeamSet
+from app.moodle.import_students import import_students_from_moodle
+from app.moodle.nrps import NrpsNotAvailable
 from app.paginators.pagination import ExamplePagination
 from app.permissions import IsCourseInstructor
 from app.serializers.attribute import AttributeSerializer
@@ -112,17 +113,20 @@ class CourseViewSet(
     )
     def import_students_from_lms(self, request, pk=None):
         course = self.get_object()
-        if course.organization.lms_type == LMSTypeOptions.CANVAS:
-            import_students_from_canvas(request, course=course)
+
+        if course.organization.lms_type == LMSTypeOptions.MOODLE:
+            try:
+                import_students_from_moodle(course)
+            except NrpsNotAvailable as e:
+                return Response(
+                    {"detail": str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY
+                )
             return Response(status=status.HTTP_200_OK)
 
-        # other LMS: LTI Names and Roles service
-        try:
-            import_students_via_nrps(course)
-        except NrpsNotAvailable as e:
-            return Response(
-                {"detail": str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY
-            )
+        if (response := lms_not_supported_response(course)) is not None:
+            return response
+
+        import_students_from_canvas(request, course=course)
         return Response(status=status.HTTP_200_OK)
 
     @action(

@@ -9,41 +9,22 @@ from django.conf import settings
 from rest_framework.authtoken.models import Token
 
 from accounts.models import MyUser
+from app.canvas.lti_launch import parse_canvas_launch
 from app.models import CourseMember, Course, Organization
 from app.models.course_member import UserRole
 from app.models.organization import LMSTypeOptions
+from app.moodle.lti_launch import parse_moodle_launch
 from lti import lti_util
+from lti.claims import CLAIM_NRPS, CLAIM_ROLES, get_lms_type
 from pprint import pprint
 import os
 
 
-CLAIM_CUSTOM = "https://purl.imsglobal.org/spec/lti/claim/custom"
-CLAIM_CONTEXT = "https://purl.imsglobal.org/spec/lti/claim/context"
-CLAIM_TOOL_PLATFORM = "https://purl.imsglobal.org/spec/lti/claim/tool_platform"
-CLAIM_NRPS = "https://purl.imsglobal.org/spec/lti-nrps/claim/namesroleservice"
-
-
-def get_lms_type(launch_data: dict) -> str:
-    """Detect the LMS from the platform claim, falling back to Canvas."""
-    family = (launch_data.get(CLAIM_TOOL_PLATFORM) or {}).get("product_family_code")
-    if family == "moodle":
-        return LMSTypeOptions.MOODLE
-    return LMSTypeOptions.CANVAS
-
-
-def get_lms_ids(launch_data: dict) -> tuple[str | None, str | None]:
-    """
-    Returns (course id, user id) as the LMS knows them.
-    Canvas ids come from custom fields (see
-    https://gist.github.com/jbasdf/15fb8abed66fbaf623cdfbdd45bfb1c4), other
-    platforms use the standard LTI claims.
-    """
-    custom = launch_data.get(CLAIM_CUSTOM) or {}
-    course_id = custom.get("canvas_course_id") or (
-        launch_data.get(CLAIM_CONTEXT) or {}
-    ).get("id")
-    user_id = custom.get("canvas_user_id") or launch_data.get("sub")
-    return course_id, user_id
+# Maps the claims of each LMS's launch to what Teamable needs
+LAUNCH_PARSERS = {
+    LMSTypeOptions.CANVAS: parse_canvas_launch,
+    LMSTypeOptions.MOODLE: parse_moodle_launch,
+}
 
 
 @csrf_exempt
@@ -85,9 +66,7 @@ def launch(request):
     message_launch_data = message_launch.get_launch_data()
 
     # check if instructor
-    roles = message_launch_data.get(
-        "https://purl.imsglobal.org/spec/lti/claim/roles", []
-    )
+    roles = message_launch_data.get(CLAIM_ROLES, [])
 
     has_admin_role = (
         "http://purl.imsglobal.org/vocab/lis/v2/membership#Administrator" in roles
@@ -119,22 +98,17 @@ def launch(request):
     launch_iss = message_launch_data.get("iss")
 
     lms_type = get_lms_type(message_launch_data)
-    lms_course_id, lms_user_id = get_lms_ids(message_launch_data)
-
-    if not lms_course_id or not lms_user_id:
-        raise Exception(
-            "Missing course/user id in the LTI launch. For Canvas, check that the "
-            "custom_fields block is configured on the developer key"
-        )
+    lms_launch = LAUNCH_PARSERS[lms_type](message_launch_data)
 
     # create/sync user
     auth_user, created = MyUser.objects.get_or_create(
         # Make the username unique to the launch ISS, so different
-        # institution's Canvas instance creates unique usernames
-        username=f"{lms_user_id}+{launch_iss}"
+        # institutions' LMS instances create unique usernames
+        username=f"{lms_launch.user_id}+{launch_iss}"
     )
-    auth_user.first_name = message_launch_data.get("given_name")
-    auth_user.last_name = message_launch_data.get("family_name")
+    # names are only sent if the LMS's privacy settings allow it
+    auth_user.first_name = lms_launch.first_name or ""
+    auth_user.last_name = lms_launch.last_name or ""
 
     auth_user.set_unusable_password()
     auth_user.save()
@@ -152,11 +126,9 @@ def launch(request):
     )
 
     course, created = Course.objects.get_or_create(
-        lms_course_id=lms_course_id,
+        lms_course_id=lms_launch.course_id,
         defaults={
-            "name": message_launch_data.get(
-                "https://purl.imsglobal.org/spec/lti/claim/context", {}
-            ).get("label"),
+            "name": lms_launch.course_name,
             "organization": organization,
         },
     )
@@ -177,7 +149,7 @@ def launch(request):
         defaults={
             "first_name": auth_user.first_name,
             "last_name": auth_user.last_name,
-            "lms_id": lms_user_id,
+            "lms_id": lms_launch.user_id,
         },
     )
     course_member.role = role
