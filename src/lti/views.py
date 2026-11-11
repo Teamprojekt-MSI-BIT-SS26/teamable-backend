@@ -9,10 +9,22 @@ from django.conf import settings
 from rest_framework.authtoken.models import Token
 
 from accounts.models import MyUser
+from app.canvas.lti_launch import parse_canvas_launch
 from app.models import CourseMember, Course, Organization
 from app.models.course_member import UserRole
+from app.models.organization import LMSTypeOptions
+from app.moodle.lti_launch import parse_moodle_launch
 from lti import lti_util
+from lti.claims import CLAIM_NRPS, CLAIM_ROLES, get_lms_type
 from pprint import pprint
+import os
+
+
+# Maps the claims of each LMS's launch to what Teamable needs
+LAUNCH_PARSERS = {
+    LMSTypeOptions.CANVAS: parse_canvas_launch,
+    LMSTypeOptions.MOODLE: parse_moodle_launch,
+}
 
 
 @csrf_exempt
@@ -53,10 +65,8 @@ def launch(request):
 
     message_launch_data = message_launch.get_launch_data()
 
-    # check if instructor (only instructors can LTI launch at this time)
-    roles = message_launch_data.get(
-        "https://purl.imsglobal.org/spec/lti/claim/roles", []
-    )
+    # check if instructor
+    roles = message_launch_data.get(CLAIM_ROLES, [])
 
     has_admin_role = (
         "http://purl.imsglobal.org/vocab/lis/v2/membership#Administrator" in roles
@@ -87,30 +97,18 @@ def launch(request):
 
     launch_iss = message_launch_data.get("iss")
 
+    lms_type = get_lms_type(message_launch_data)
+    lms_launch = LAUNCH_PARSERS[lms_type](message_launch_data)
+
     # create/sync user
-    # custom variables need to be defined in Canvas, defined by consulting
-    #   https://gist.github.com/jbasdf/15fb8abed66fbaf623cdfbdd45bfb1c4
-    canvas_course_id = message_launch_data.get(
-        "https://purl.imsglobal.org/spec/lti/claim/custom", {}
-    ).get("canvas_course_id")
-    canvas_user_id = message_launch_data.get(
-        "https://purl.imsglobal.org/spec/lti/claim/custom", {}
-    ).get("canvas_user_id")
-
-    if not canvas_course_id or not canvas_user_id:
-        raise Exception(
-            "Missing canvas_course_id/canvas_user_id custom claims. Check "
-            "that the custom_fields block is configured on the Canvas "
-            "developer key"
-        )
-
     auth_user, created = MyUser.objects.get_or_create(
         # Make the username unique to the launch ISS, so different
-        # institution's Canvas instance creates unique usernames
-        username=f"{canvas_user_id}+{launch_iss}"
+        # institutions' LMS instances create unique usernames
+        username=f"{lms_launch.user_id}+{launch_iss}"
     )
-    auth_user.first_name = message_launch_data.get("given_name")
-    auth_user.last_name = message_launch_data.get("family_name")
+    # names are only sent if the LMS's privacy settings allow it
+    auth_user.first_name = lms_launch.first_name or ""
+    auth_user.last_name = lms_launch.last_name or ""
 
     auth_user.set_unusable_password()
     auth_user.save()
@@ -119,20 +117,31 @@ def launch(request):
     auth_login(request, auth_user)
 
     # make the authentication token for the frontend
-    Token.objects.get_or_create(user=auth_user)
+    auth_token, _ = Token.objects.get_or_create(user=auth_user)
 
-    # todo: this is only true for now
-    organization = Organization.objects.first()
+    # todo: this does not distinguish multiple organizations of the same LMS type
+    organization = (
+        Organization.objects.filter(lms_type=lms_type).first()
+        or Organization.objects.first()
+    )
 
     course, created = Course.objects.get_or_create(
-        lms_course_id=canvas_course_id,
+        lms_course_id=lms_launch.course_id,
         defaults={
-            "name": message_launch_data.get(
-                "https://purl.imsglobal.org/spec/lti/claim/context", {}
-            ).get("label"),
+            "name": lms_launch.course_name,
             "organization": organization,
         },
     )
+
+    # remember how to reach the LTI Advantage services (Names and Roles) for this course
+    memberships_url = (message_launch_data.get(CLAIM_NRPS) or {}).get(
+        "context_memberships_url"
+    )
+    if memberships_url:
+        course.lms_iss = launch_iss
+        course.lms_client_id = message_launch.get_client_id()
+        course.lms_memberships_url = memberships_url
+        course.save()
 
     course_member, created = CourseMember.objects.get_or_create(
         user=auth_user,
@@ -140,12 +149,19 @@ def launch(request):
         defaults={
             "first_name": auth_user.first_name,
             "last_name": auth_user.last_name,
-            "lms_id": canvas_user_id,
+            "lms_id": lms_launch.user_id,
         },
     )
     course_member.role = role
     course_member.save()
 
+    if lms_type == LMSTypeOptions.CANVAS:
+        # Canvas API access needs an OAuth2 token on top of the LTI login
+        return redirect(
+            f"{reverse('canvas-oauth-initiate')}?redirect_path=/course/{course.pk}"
+        )
+
+    client_url = os.environ.get("FRONTEND_BASE_URL")
     return redirect(
-        f"{reverse('canvas-oauth-initiate')}?redirect_path=/course/{course.pk}"
+        f"{client_url}/authenticate?token={auth_token}&path=/course/{course.pk}"
     )
