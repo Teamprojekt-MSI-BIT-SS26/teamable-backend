@@ -8,7 +8,7 @@ from app.canvas.import_attribute import import_gradebook_attribute_from_canvas
 from app.canvas.import_students import import_students_from_canvas
 from app.canvas.opt_in_quiz import create_opt_in_quiz_canvas
 from app.filters.course_member import FilterStudents
-from app.models.attribute import Attribute, AttributeManageType
+from app.models.attribute import AttributeManageType
 from app.models.course import Course
 from app.models.course_member import UserRole
 from app.models.team import TeamSet
@@ -21,7 +21,8 @@ from app.serializers.teams import (
     DisplayManyTeamSetSerializer,
     DisplaySingleTeamSetSerializer,
 )
-from app.services.team_generation import generate_teams
+from app.serializers.team_generation import GenerateTeamsSerializer
+from app.services.team_generation import TeamGenerationError, generate_teams
 
 
 class ExportTeamSerializer(serializers.ModelSerializer):
@@ -43,19 +44,6 @@ class CourseTeamSetsSerializer(serializers.ModelSerializer):
     class Meta:
         model = Course
         fields = ["team_sets"]
-
-
-class GenerateTeamsSerializer(serializers.ModelSerializer):
-    attribute = serializers.PrimaryKeyRelatedField(queryset=Attribute.objects.all())
-
-    class Meta:
-        model = Course
-        fields = ["attribute"]
-
-    def validate_attribute(self, value):
-        if not value.course == self.instance:
-            raise serializers.ValidationError("Attribute must belong to the course")
-        return value
 
 
 class OnboardingProgressSerializer(serializers.ModelSerializer):
@@ -172,10 +160,10 @@ class CourseViewSet(
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # Pylance doesn't know that validated_data is valid after is_valid() check
-        attribute = serializer.validated_data["attribute"]  # type: ignore
-
-        team_set = generate_teams(course, attribute)
+        try:
+            team_set = generate_teams(course, serializer.to_parameters())
+        except TeamGenerationError as e:
+            return Response({"error": str(e)}, status=e.status_code)
         return Response({"team_set_id": team_set.pk}, status=status.HTTP_200_OK)
 
     @action(
