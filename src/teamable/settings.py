@@ -181,6 +181,17 @@ CANVAS_OAUTH_CANVAS_DOMAIN = CANVAS_BASE_URL
 
 LTI_ENABLED = is_lti_enabled()
 
+# Team generation API (repository "algorithms"), see docs/team_generation.md
+# empty values in .env fall back to the defaults
+TEAM_GENERATION_API_URL = (
+    os.environ.get("TEAM_GENERATION_API_URL")
+    or "http://localhost:8001/api/generate/teams/"
+)
+# plain key, the algorithms API only stores its hash
+TEAM_GENERATION_API_KEY = os.environ.get("TEAM_GENERATION_API_KEY") or None
+# seconds; the priority algorithm runs for up to 30 seconds
+TEAM_GENERATION_API_TIMEOUT = int(os.environ.get("TEAM_GENERATION_API_TIMEOUT") or 90)
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

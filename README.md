@@ -39,6 +39,9 @@ Installation:
    python3 manage.py runserver
    ```
 
+Team generation needs the algorithms API. Its setup, the endpoint and the tests are described in
+[docs/team_generation.md](docs/team_generation.md).
+
 Project Setup (only needs to be run the first time the project is run):
 
 1. Create a superuser in Django
