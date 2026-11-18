@@ -12,6 +12,7 @@ from accounts.models import MyUser
 from app.models import CourseMember, Course, Organization
 from app.models.course_member import UserRole
 from lti import lti_util
+from app.moodle.launch import is_moodle_launch, handle_moodle_launch
 from pprint import pprint
 
 
@@ -84,6 +85,9 @@ def launch(request):
 
     if settings.DEBUG:
         pprint(message_launch_data)
+
+    if is_moodle_launch(message_launch_data):
+        return handle_moodle_launch(request, message_launch_data, role)
 
     launch_iss = message_launch_data.get("iss")
 

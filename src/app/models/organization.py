@@ -5,6 +5,7 @@ from app.models.base_models import BaseModel
 
 class LMSTypeOptions(models.TextChoices):
     CANVAS = "CANVAS"
+    MOODLE = "MOODLE"
 
 
 class Organization(BaseModel):

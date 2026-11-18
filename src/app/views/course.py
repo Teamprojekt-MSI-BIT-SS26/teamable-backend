@@ -7,6 +7,8 @@ from app.canvas.export_team import export_team_to_canvas
 from app.canvas.import_attribute import import_gradebook_attribute_from_canvas
 from app.canvas.import_students import import_students_from_canvas
 from app.canvas.opt_in_quiz import create_opt_in_quiz_canvas
+from app.moodle.import_students import import_students_from_moodle
+from app.models.organization import LMSTypeOptions
 from app.filters.course_member import FilterStudents
 from app.models.attribute import AttributeManageType
 from app.models.course import Course
@@ -87,7 +89,10 @@ class CourseViewSet(
     )
     def import_students_from_lms(self, request, pk=None):
         course = self.get_object()
-        import_students_from_canvas(request, course=course)
+        if course.organization.lms_type == LMSTypeOptions.MOODLE:
+            import_students_from_moodle(course=course)
+        else:
+            import_students_from_canvas(request, course=course)
         return Response(status=status.HTTP_200_OK)
 
     @action(

@@ -1,0 +1,14 @@
+# Nur fuer die lokale Moodle-Entwicklung (wird von docker compose automatisch geladen).
+services:
+    moodle-proxy:
+        image: nginx:latest
+        volumes:
+            - ./config/moodle-proxy.local.conf:/etc/nginx/conf.d/default.conf:ro
+        networks:
+            - default
+            - moodle
+
+networks:
+    moodle:
+        name: teamable-moodle_default
+        external: true
