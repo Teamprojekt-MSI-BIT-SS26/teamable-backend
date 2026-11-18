@@ -9,7 +9,8 @@ from app.models.course_member import CourseMember, UserRole
 from app.models.organization import LMSTypeOptions
 from lti import lti_util
 
-LEARNER_ROLE = "http://purl.imsglobal.org/vocab/lis/v2/membership#Learner"
+# Moodle sends the short name ("Learner"), other platforms the full URN
+LEARNER_ROLES = {"Learner", "http://purl.imsglobal.org/vocab/lis/v2/membership#Learner"}
 
 
 def _internal_url(url: str) -> str:
@@ -47,7 +48,7 @@ def import_students_from_moodle(course: Course):
     )
 
     for member in nrps.get_members():
-        if LEARNER_ROLE not in member.get("roles", []):
+        if not LEARNER_ROLES.intersection(member.get("roles", [])):
             continue
         if member.get("status", "Active") != "Active":
             continue
